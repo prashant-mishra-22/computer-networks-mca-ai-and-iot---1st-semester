@@ -1,0 +1,160 @@
+import threading
+from queue import Queue
+import random
+import time
+from datetime import datetime
+
+# Constants for Selective Repeat
+WINDOW_SIZE = 4  # Example window size
+MAX_SEQ_NUM = 8  # Sequence numbers range from 0 to MAX_SEQ_NUM-1
+
+qf = Queue(maxsize=WINDOW_SIZE)  # Frame buffer (for sender -> receiver)
+qa = Queue(maxsize=WINDOW_SIZE)  # Acknowledgment queue (for receiver -> sender)
+
+# Track sent frames, acknowledgments, and received frames
+sent_frames = {}  # Sequence number -> frame
+acknowledged = [False] * MAX_SEQ_NUM  # Boolean array for acknowledged frames
+timers = [None] * MAX_SEQ_NUM  # Store timers for each frame
+
+# Current time function for log purposes
+def ctime():
+    myobj = datetime.now()
+    s = " " + str(myobj.hour) + ":" + str(myobj.minute) + ":" + str(myobj.second)
+    return s
+
+# Request to send data
+def req():
+    time.sleep(random.randint(0, 3))
+    return True
+
+# Get data to send (user input simulation)
+def GetData():
+    d = input(f"\n{ctime()} [ SENDER ] enter data to send: ")
+    time.sleep(random.randint(0, 1))
+    return d
+
+# Create a frame with sequence number
+def MakeFrame(seq_num, data):
+    f = f"Frame-{seq_num}: {data}"
+    time.sleep(random.randint(0, 1))
+    return f
+
+# Send frame to the receiver
+def SendFrame(frame):
+    print(f"\n{ctime()} [ SENDER ] {frame} sent to receiver")
+    time.sleep(random.randint(0, 1))
+    qf.put(frame)
+
+# Receive acknowledgment from the receiver
+def ReceiveAck():
+    ack = qa.get()
+    time.sleep(random.randint(0, 1))
+    print(f"\n{ctime()} [ SENDER ] received {ack} from receiver")
+    return ack
+
+# Receive a frame from the sender
+def ReceiveFrame():
+    print(f"\n{ctime()} [ RECEIVER ] frame received at receiver")
+    return qf.get()
+
+# Extract data from a frame
+def ExtractData(frame):
+    print(f"\n{ctime()} [ RECEIVER ] data extracted at receiver")
+    data = frame.split(': ')[1]
+    return data
+
+# Deliver data to the network layer at receiver
+def DeliverData(data):
+    print(f"\n{ctime()} [ RECEIVER ] {data} delivered to network layer at receiver")
+
+# Send acknowledgment (ACK) back to sender
+def SendAck(seq_num):
+    print(f"\n{ctime()} [ RECEIVER ] ACK-{seq_num} sent to sender")
+    qa.put(f"ACK-{seq_num}")
+
+# Send negative acknowledgment (NAK) for corrupted or out-of-sequence frames
+def SendNAK(seq_num):
+    print(f"\n{ctime()} [ RECEIVER ] NAK-{seq_num} sent to sender")
+    qa.put(f"NAK-{seq_num}")
+
+# Sender function
+def sender():
+    base = 0  # Left edge of the window
+    next_seq_num = 0  # Next frame to send
+    while True:
+        RequestToSend = req()
+        if RequestToSend:
+            if next_seq_num < base + WINDOW_SIZE:
+                data = GetData()
+                frame = MakeFrame(next_seq_num, data)
+                SendFrame(frame)
+                sent_frames[next_seq_num] = frame  # Store the sent frame
+                timers[next_seq_num] = threading.Timer(2, timeout, [next_seq_num])  # Start the timer for this frame
+                timers[next_seq_num].start()  # Start the timer
+                next_seq_num += 1
+            else:
+                print(f"{ctime()} [ SENDER ] Window full, waiting for ACKs")
+
+        # Handle incoming ACKs or NAKs
+        if not qa.empty():
+            ack = ReceiveAck()
+            seq_num = int(ack.split('-')[1])
+
+            if ack.startswith('ACK'):
+                acknowledged[seq_num] = True
+                stopTimer(seq_num)
+                base = seq_num + 1
+
+                # Slide window and send new frames
+                while base < MAX_SEQ_NUM and acknowledged[base]:
+                    base += 1
+
+            elif ack.startswith('NAK'):
+                seq_num = int(ack.split('-')[1])
+                if seq_num in sent_frames:
+                    print(f"{ctime()} [ SENDER ] Resending frame-{seq_num} due to NAK")
+                    SendFrame(sent_frames[seq_num])
+                    timers[seq_num] = threading.Timer(2, timeout, [seq_num])
+                    timers[seq_num].start()
+
+# Receiver function
+def receiver():
+    expected_seq_num = 0  # Next expected frame sequence number
+    while True:
+        if not qf.empty():
+            frame = ReceiveFrame()
+            seq_num = int(frame.split('-')[0].split('Frame-')[1])
+
+            if seq_num == expected_seq_num:
+                data = ExtractData(frame)
+                DeliverData(data)
+                expected_seq_num += 1
+                SendAck(seq_num)
+            elif seq_num > expected_seq_num:
+                # Frame out of order, store it for later delivery
+                print(f"{ctime()} [ RECEIVER ] Frame-{seq_num} received out of order, buffering")
+                SendAck(seq_num)  # Send ACK for the out-of-order frame
+            else:
+                # Duplicate frame, ignore and send ACK again
+                print(f"{ctime()} [ RECEIVER ] Duplicate frame-{seq_num} ignored")
+                SendAck(seq_num)
+
+# Timeout function (for retransmitting lost frames)
+def timeout(seq_num):
+    if not acknowledged[seq_num]:
+        print(f"{ctime()} [ SENDER ] Frame-{seq_num} timed out, resending")
+        SendFrame(sent_frames[seq_num])
+        timers[seq_num] = threading.Timer(2, timeout, [seq_num])
+        timers[seq_num].start()
+
+# Stop the timer for a frame
+def stopTimer(seq_num):
+    if timers[seq_num]:
+        timers[seq_num].cancel()
+
+# Start the threads for sender and receiver
+start_time = time.time()
+sender_thread = threading.Thread(target=sender, args=())
+receiver_thread = threading.Thread(target=receiver, args=())
+sender_thread.start()
+receiver_thread.start()
